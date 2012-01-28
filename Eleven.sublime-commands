@@ -8,7 +8,7 @@
 		"command": "clojure_evaluate",
 		"args": {
 			"expr": "${selection}",
-			"view_name": "(in-ns '${ns})",
+			"view_name": "(in-ns '${new_ns})",
 			"output": "$ns=> $expr\n$output\n\n",
 			"syntax_file": null
 		}

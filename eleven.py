@@ -258,9 +258,10 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
         if syntax_file:
             view.set_syntax_file(syntax_file)
 
-        result = results[-1]
+        mapping = results[-1].copy()
+        mapping.update(new_ns=client.ns)
         template = string.Template(output)
-        output_to_view(view, template.safe_substitute(result))
+        output_to_view(view, template.safe_substitute(mapping))
 
         if output_to == "panel":
             self._window.run_command("show_panel",
@@ -270,8 +271,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
             view.sel().add(sublime.Region(0))
 
             view_name_template = string.Template(view_name)
-            #FIXME uses last command's ns instead of new one
-            view.set_name(view_name_template.safe_substitute(result))
+            view.set_name(view_name_template.safe_substitute(mapping))
 
             active_view = self._window.active_view()
             active_group = self._window.active_group()
