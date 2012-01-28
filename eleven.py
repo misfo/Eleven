@@ -3,7 +3,7 @@ import sublime, sublime_plugin
 from functools import partial
 
 max_cols = 60
-repls_file = ".clojure-repls.json"
+repls_file = ".eleven.json"
 
 def clean(str):
     return str.translate(None, '\r') if str else None
@@ -48,49 +48,71 @@ def new_sock(port):
 
 def send(sock, expr):
     if expr: sock.send(expr + "\n")
-    output = "" # TODO use buffer instead?
+    output = ""
     while 1:
         output += sock.recv(1024)
         match = re.match(r"(.*\n)?(\S+)=> $", output, re.DOTALL)
-        if match: return (clean(match.group(1)), match.group(2))
+        if match:
+            return (clean(match.group(1)), match.group(2))
+        elif output == "":
+            return (None, None)
+
 
 # indexed by window id
 repls = {}
+
+def get_ports():
+    return sublime.load_settings(repls_file).get('ports') or {}
+
+def set_ports(ports, save=True):
+    sublime.load_settings(repls_file).set('ports', ports)
+    if save:
+        sublime.save_settings(repls_file)
 
 def get_repl(window_id):
     if repls.get(window_id):
         return repls[window_id]
     else:
-        port = sublime.load_settings(repls_file).get(str(window_id))
+        ports = get_ports()
+        port = ports.get(str(window_id))
+        if not port:
+            return None
         repl = REPL(port)
         try:
             repl.connect()
         except socket.error:
-            sublime.load_settings(repls_file).erase(str(window_id))
-            sublime.save_settings(repls_file)
+            del ports[str(window_id)]
+            set_ports(ports, False)
             return None
         repls[window_id] = repl
         return repl
 
 def save_repl_port(window_id, repl):
     if repl.port:
-        sublime.load_settings(repls_file).set(window_id, repl.port)
-        sublime.save_settings(repls_file)
+        ports = get_ports()
+        ports[str(window_id)] = repl.port
+        #FIXME saving other ports as floating point
+        set_ports(ports)
     else:
         sublime.set_timeout(partial(save_repl_port, window_id, repl), 100)
 
 def set_repl(window_id, repl):
     repls[window_id] = repl
-    save_repl_port(str(window_id), repl)
+    save_repl_port(window_id, repl)
+
+
+
 
 class REPL:
     def __init__(self, port=None):
         self.port = port
+        self.starting = False
         self.persistent_sock = None
         self.ns = None
         self.view = None
 
     def start(self, cwd, window_id):
+        self.starting = True
         proc = subprocess.Popen(["lein", "repl"], stdout=subprocess.PIPE,
                                                   stderr=subprocess.PIPE,
                                                   cwd=cwd)
@@ -101,14 +123,15 @@ class REPL:
             status = "Clojure REPL started on port " + str(self.port)
             sublime.set_timeout(partial(sublime.status_message, status), 0)
             self.connect()
+            self.starting = False
         else:
             exit_with_error("Unable to start a REPL with `lein repl`")
 
     def connect(self):
         self.persistent_sock = new_sock(self.port)
 
-    def evaluate(self, exprs, persistent, on_complete):
-        while not self.persistent_sock:
+    def evaluate(self, exprs, persistent=False, on_complete=None):
+        while self.starting:
             time.sleep(0.1)
         sock = self.persistent_sock if persistent else new_sock(self.port)
 
@@ -125,7 +148,15 @@ class REPL:
         if persistent:
             self.ns = ns
 
-        sublime.set_timeout(partial(on_complete, results), 0)
+        if on_complete:
+            sublime.set_timeout(partial(on_complete, results), 0)
+
+    def kill(self):
+        try:
+            self.evaluate(["(System/exit 0)"])
+        except:
+            # Probably already dead
+            pass
 
 class LazyViewString:
     def __init__(self, view):
@@ -276,3 +307,18 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 self._window.focus_view(active_view)
 
             view.set_viewport_position(view.text_to_layout(0))
+
+class REPLKiller(sublime_plugin.EventListener):
+    def on_close(self, view):
+        wids = [str(w.id()) for w in sublime.windows()]
+        ports = get_ports()
+        active_ports = dict((w, ports[w]) for w in wids if w in ports)
+        kill_ports = set(ports.values()) - set(active_ports.values())
+
+        # Bring out yer dead!
+        for port in kill_ports:
+            repl = REPL(port)
+            thread.start_new_thread(repl.kill, ())
+
+        if ports != active_ports:
+            set_ports(active_ports)
