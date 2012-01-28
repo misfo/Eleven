@@ -40,123 +40,80 @@ def exit_with_error(message):
     sublime.error_message(message)
     sys.exit(1)
 
-def new_sock(port):
-    sock = socket.socket()
-    sock.connect(('localhost', port))
-    sock.settimeout(10)
-    return sock
 
-def send(sock, expr):
-    if expr: sock.send(expr + "\n")
-    output = ""
-    while 1:
-        output += sock.recv(1024)
-        match = re.match(r"(.*\n)?(\S+)=> $", output, re.DOTALL)
-        if match:
-            return (clean(match.group(1)), match.group(2))
-        elif output == "":
-            return (None, None)
+def get_repl_servers():
+    return sublime.load_settings(repls_file).get('repl_servers') or {}
 
-
-# indexed by window id
-repls = {}
-
-def get_ports():
-    return sublime.load_settings(repls_file).get('ports') or {}
-
-def set_ports(ports, save=True):
-    sublime.load_settings(repls_file).set('ports', ports)
+def set_repl_servers(repl_servers, save=True):
+    sublime.load_settings(repls_file).set('repl_servers', repl_servers)
     if save:
         sublime.save_settings(repls_file)
 
-def get_repl(window_id):
-    if repls.get(window_id):
-        return repls[window_id]
+
+def start_repl_server(window_id, cwd):
+    proc = subprocess.Popen(["lein", "repl"], stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE,
+                                              cwd=cwd)
+    stdout, stderr = proc.communicate()
+    match = re.search(r"listening on localhost port (\d+)", stdout)
+    if match:
+        port = int(match.group(1))
+        sublime.set_timeout(partial(on_repl_server_started, window_id, port), 0)
     else:
-        ports = get_ports()
-        port = ports.get(str(window_id))
-        if not port:
-            return None
-        repl = REPL(port)
-        try:
-            repl.connect()
-        except socket.error:
-            del ports[str(window_id)]
-            set_ports(ports, False)
-            return None
-        repls[window_id] = repl
-        return repl
+        sublime.error_message("Unable to start a REPL with `lein repl`")
 
-def save_repl_port(window_id, repl):
-    if repl.port:
-        ports = get_ports()
-        ports[str(window_id)] = repl.port
-        #FIXME saving other ports as floating point
-        set_ports(ports)
-    else:
-        sublime.set_timeout(partial(save_repl_port, window_id, repl), 100)
-
-def set_repl(window_id, repl):
-    repls[window_id] = repl
-    save_repl_port(window_id, repl)
+def on_repl_server_started(window_id, port):
+    repl_servers = get_repl_servers()
+    repl_servers[window_id] = port
+    set_repl_servers(repl_servers)
+    sublime.status_message("Clojure REPL started on port " + str(port))
 
 
+# persistent REPL clients for each window that keep their dynamic vars
+clients = {}
 
-
-class REPL:
-    def __init__(self, port=None):
-        self.port = port
-        self.starting = False
-        self.persistent_sock = None
+class ReplClient:
+    def __init__(self, port):
         self.ns = None
         self.view = None
 
-    def start(self, cwd, window_id):
-        self.starting = True
-        proc = subprocess.Popen(["lein", "repl"], stdout=subprocess.PIPE,
-                                                  stderr=subprocess.PIPE,
-                                                  cwd=cwd)
-        stdout, stderr = proc.communicate()
-        match = re.search(r"server listening on localhost port (\d+)", stdout)
-        if match:
-            self.port = int(match.group(1))
-            status = "Clojure REPL started on port " + str(self.port)
-            sublime.set_timeout(partial(sublime.status_message, status), 0)
-            self.connect()
-            self.starting = False
-        else:
-            exit_with_error("Unable to start a REPL with `lein repl`")
+        self.sock = socket.socket()
+        self.sock.connect(('localhost', port))
+        self.sock.settimeout(10)
 
-    def connect(self):
-        self.persistent_sock = new_sock(self.port)
-
-    def evaluate(self, exprs, persistent=False, on_complete=None):
-        while self.starting:
-            time.sleep(0.1)
-        sock = self.persistent_sock if persistent else new_sock(self.port)
-
-        ns = self.ns
-        if not ns or not persistent:
-            _, ns = send(sock, None)
+    def evaluate(self, exprs, on_complete=None):
+        if not self.ns:
+            _, self.ns = self._communicate()
 
         results = []
         for expr in exprs:
-            output, next_ns = send(sock, expr)
-            results.append({'ns': ns, 'expr': expr, 'output': output})
-            ns = next_ns
-
-        if persistent:
-            self.ns = ns
+            output, next_ns = self._communicate(expr)
+            results.append({'ns': self.ns, 'expr': expr, 'output': output})
+            self.ns = next_ns
 
         if on_complete:
             sublime.set_timeout(partial(on_complete, results), 0)
+        else:
+            return results
 
     def kill(self):
         try:
             self.evaluate(["(System/exit 0)"])
-        except:
+        except socket.error:
             # Probably already dead
             pass
+
+    def _communicate(self, expr=None):
+        if expr:
+            self.sock.send(expr + "\n")
+        output = ""
+        while 1:
+            output += self.sock.recv(1024)
+            match = re.match(r"(.*\n)?(\S+)=> $", output, re.DOTALL)
+            if match:
+                return (clean(match.group(1)), match.group(2))
+            elif output == "":
+                return (None, None)
 
 class LazyViewString:
     def __init__(self, view):
@@ -185,11 +142,22 @@ class SymbolUnderCursor(LazyViewString):
         else:
             return self.view.substr(sublime.Region(begin, end))
 
+
 class ClojureStartRepl(sublime_plugin.WindowCommand):
     def run(self):
         wid = self.window.id()
-        repl = get_repl(wid)
-        if repl: return
+        repl_servers = get_repl_servers()
+        port = repl_servers.get(str(wid))
+        if port:
+            client = clients.get(wid)
+            if client:
+                return
+            try:
+                clients[wid] = ReplClient(port)
+                return
+            except socket.error:
+                del repl_servers[str(wid)]
+                set_repl_servers(repl_servers)
 
         sublime.status_message("Starting Clojure REPL")
         #FIXME don't use active view
@@ -203,21 +171,13 @@ class ClojureStartRepl(sublime_plugin.WindowCommand):
                 cwd = project_path(folder)
                 if cwd: break
 
-        repl = REPL()
-        set_repl(wid, repl)
-        thread.start_new_thread(repl.start, (cwd, wid))
+        thread.start_new_thread(start_repl_server, (str(wid), cwd))
 
 class ClojureEvaluate(sublime_plugin.TextCommand):
-    def run(self, edit,
-            expr,
-            input_panel = None,
-            syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
-            view_name = '$expr',
-            **kwargs):
+    def run(self, edit, expr, input_panel = None, **kwargs):
         self._window = self.view.window()
         self._expr = expr
-        self._syntax_file = syntax_file
-        self._view_name = view_name
+
         self._window.run_command('clojure_start_repl')
 
         if input_panel:
@@ -237,6 +197,15 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
             self._handle_input(None, **kwargs)
 
     def _handle_input(self, from_input_panel, output_to = "repl", **kwargs):
+        wid = self._window.id()
+        port = get_repl_servers().get(str(wid))
+        if not port:
+            sublime.set_timeout(partial(self._handle_input,
+                                        from_input_panel,
+                                        output_to,
+                                        **kwargs), 100)
+            return
+
         template = string.Template(self._expr)
         expr = template.safe_substitute({
             "from_input_panel": from_input_panel,
@@ -252,15 +221,25 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                          + "(in-ns '" + file_ns + "))")
         exprs.append(expr)
 
-        repl = get_repl(self._window.id())
-        persistent = output_to == "repl"
+        if output_to == "repl":
+            client = clients.get(wid)
+            #FIXME open a new client if the client's view has been closed
+            if not client:
+                client = ReplClient(port)
+                clients[wid] = client
+        else:
+            client = ReplClient(port)
+
         on_complete = partial(self._handle_results,
+                              client = client,
                               output_to = output_to,
                               **kwargs)
-        thread.start_new_thread(repl.evaluate,
-                                (exprs, persistent, on_complete))
+        thread.start_new_thread(client.evaluate, (exprs, on_complete))
 
-    def _handle_results(self, results, output_to, output = '$output'):
+    def _handle_results(self, results, client, output_to,
+            output = '$output',
+            syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
+            view_name = '$expr'):
         if output_to == "panel":
             view = self._window.get_output_panel('clojure_output')
         elif output_to == "view":
@@ -268,19 +247,16 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
             view.set_scratch(True)
             view.set_read_only(True)
         else:
-            repl = get_repl(self._window.id())
-            print "repl.view", repl.view
-            if repl.view: print "repl.view.window()", repl.view.window()
-            if not repl.view:
-                repl.view = self._window.new_file()
-                repl.view.set_scratch(True)
-                repl.view.set_read_only(True)
-                repl.view.settings().set('scroll_past_end', True)
+            if not client.view:
+                client.view = self._window.new_file()
+                client.view.set_scratch(True)
+                client.view.set_read_only(True)
+                client.view.settings().set('scroll_past_end', True)
 
-            view = repl.view
+            view = client.view
 
-        if self._syntax_file:
-            view.set_syntax_file(self._syntax_file)
+        if syntax_file:
+            view.set_syntax_file(syntax_file)
 
         result = results[-1]
         template = string.Template(output)
@@ -293,7 +269,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
             view.sel().clear()
             view.sel().add(sublime.Region(0))
 
-            view_name_template = string.Template(self._view_name)
+            view_name_template = string.Template(view_name)
             #FIXME uses last command's ns instead of new one
             view.set_name(view_name_template.safe_substitute(result))
 
@@ -308,17 +284,17 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
 
             view.set_viewport_position(view.text_to_layout(0))
 
-class REPLKiller(sublime_plugin.EventListener):
+class ReplServerKiller(sublime_plugin.EventListener):
     def on_close(self, view):
         wids = [str(w.id()) for w in sublime.windows()]
-        ports = get_ports()
-        active_ports = dict((w, ports[w]) for w in wids if w in ports)
-        kill_ports = set(ports.values()) - set(active_ports.values())
+        servers = get_repl_servers()
+        active_servers = dict((w, servers[w]) for w in wids if w in servers)
+        kill_ports = set(servers.values()) - set(active_servers.values())
 
         # Bring out yer dead!
         for port in kill_ports:
-            repl = REPL(port)
+            repl = ReplClient(port)
             thread.start_new_thread(repl.kill, ())
 
-        if ports != active_ports:
-            set_ports(active_ports)
+        if servers != active_servers:
+            set_repl_servers(active_servers)
