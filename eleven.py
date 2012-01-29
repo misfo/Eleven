@@ -26,11 +26,13 @@ def classpath_relative_path(file_name):
         segments.insert(0, segment)
 
 def output_to_view(v, text):
+    start = v.size()
     v.set_read_only(False)
     edit = v.begin_edit()
-    v.insert(edit, v.size(), text)
+    end = start + v.insert(edit, start, text)
     v.end_edit(edit)
     v.set_read_only(True)
+    return sublime.Region(start, end)
 
 def is_open_in(view, window):
     return view and window.get_view_index(view)[0] > -1
@@ -259,7 +261,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
         mapping = results[-1].copy()
         mapping.update(new_ns=client.ns)
         output = string.Template(output).safe_substitute(mapping)
-        output_to_view(view, output)
+        output_region = output_to_view(view, output)
 
         if output_to == "panel":
             self._window.run_command("show_panel",
@@ -291,7 +293,10 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 self._window.focus_view(active_view)
 
             if output_to == "view":
-                view.set_viewport_position(view.text_to_layout(0))
+                view.show(0)
+            else:
+                # not sure why this has to be reversed
+                view.show(sublime.Region(output_region.b, output_region.a))
 
 class ReplServerKiller(sublime_plugin.EventListener):
     def on_close(self, view):
