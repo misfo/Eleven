@@ -130,8 +130,8 @@ class LazyViewString:
 class Selection(LazyViewString):
     def get_string(self):
         sel = self.view.sel()
-        if len(sel) == 1:
-            return self.view.substr(self.view.sel()[0]).strip()
+        if len(sel) == 1 and not sel[0].empty():
+            return self.view.substr(sel[0]).strip()
         else:
             exit_with_status("There must be one selection to evaluate")
 
