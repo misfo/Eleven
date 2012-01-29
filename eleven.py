@@ -35,14 +35,6 @@ def output_to_view(v, text):
 def is_open_in(view, window):
     return view and window.get_view_index(view)[0] > -1
 
-def exit_with_status(message):
-    sublime.status_message(message)
-    sys.exit(1)
-
-def exit_with_error(message):
-    sublime.error_message(message)
-    sys.exit(1)
-
 
 def get_repl_servers():
     return sublime.load_settings(repls_file).get('repl_servers') or {}
@@ -133,7 +125,7 @@ class Selection(LazyViewString):
         if len(sel) == 1 and not sel[0].empty():
             return self.view.substr(sel[0]).strip()
         else:
-            exit_with_status("There must be one selection to evaluate")
+            raise UserWarning, "There must be one selection to evaluate"
 
 class SymbolUnderCursor(LazyViewString):
     def get_string(self):
@@ -141,7 +133,7 @@ class SymbolUnderCursor(LazyViewString):
         while symbol_char(self.view.substr(begin - 1)): begin -= 1
         while symbol_char(self.view.substr(end)): end += 1
         if begin == end:
-            exit_with_status("No symbol found under cursor")
+            raise UserWarning, "No symbol found under cursor"
         else:
             return self.view.substr(sublime.Region(begin, end))
 
@@ -209,11 +201,14 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                                         **kwargs), 100)
             return
 
-        template = string.Template(self._expr)
-        expr = template.safe_substitute({
-            "from_input_panel": from_input_panel,
-            "selection": Selection(self.view),
-            "symbol_under_cursor": SymbolUnderCursor(self.view)})
+        mapping = {"from_input_panel": from_input_panel,
+                   "selection": Selection(self.view),
+                   "symbol_under_cursor": SymbolUnderCursor(self.view)}
+        try:
+            expr = string.Template(self._expr).safe_substitute(mapping)
+        except UserWarning as warning:
+            sublime.status_message(warning.message)
+            return
 
         exprs = []
         file_name = self.view.file_name()
@@ -263,8 +258,8 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
 
         mapping = results[-1].copy()
         mapping.update(new_ns=client.ns)
-        template = string.Template(output)
-        output_to_view(view, template.safe_substitute(mapping))
+        output = string.Template(output).safe_substitute(mapping)
+        output_to_view(view, output)
 
         if output_to == "panel":
             self._window.run_command("show_panel",
@@ -273,8 +268,8 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
             view.sel().clear()
             view.sel().add(sublime.Region(0))
 
-            view_name_template = string.Template(view_name)
-            view.set_name(view_name_template.safe_substitute(mapping))
+            view_name = string.Template(view_name).safe_substitute(mapping)
+            view.set_name(view_name)
 
             active_view = self._window.active_view()
             active_group = self._window.active_group()
