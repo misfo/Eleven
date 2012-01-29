@@ -32,6 +32,9 @@ def output_to_view(v, text):
     v.end_edit(edit)
     v.set_read_only(True)
 
+def is_open_in(view, window):
+    return view and window.get_view_index(view)[0] > -1
+
 def exit_with_status(message):
     sublime.status_message(message)
     sys.exit(1)
@@ -223,10 +226,10 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
 
         if output_to == "repl":
             client = clients.get(wid)
-            #FIXME open a new client if the client's view has been closed
-            if not client:
+            if not client or not is_open_in(client.view, self._window):
                 client = ReplClient(port)
                 clients[wid] = client
+
         else:
             client = ReplClient(port)
 
