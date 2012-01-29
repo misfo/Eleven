@@ -78,11 +78,12 @@ class ReplClient:
 
     def evaluate(self, exprs, on_complete=None):
         if not self.ns:
-            _, self.ns = self._communicate()
+            _, self.ns = self._recv_until_prompted()
 
         results = []
         for expr in exprs:
-            output, next_ns = self._communicate(expr)
+            self.sock.send(expr + "\n")
+            output, next_ns = self._recv_until_prompted()
             results.append({'ns': self.ns, 'expr': expr, 'output': output})
             self.ns = next_ns
 
@@ -98,9 +99,7 @@ class ReplClient:
             # Probably already dead
             pass
 
-    def _communicate(self, expr=None):
-        if expr:
-            self.sock.send(expr + "\n")
+    def _recv_until_prompted(self):
         output = ""
         while 1:
             output += self.sock.recv(1024)
