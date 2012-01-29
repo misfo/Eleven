@@ -234,9 +234,9 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
         thread.start_new_thread(client.evaluate, (exprs, on_complete))
 
     def _handle_results(self, results, client, output_to,
-            output = '$output',
-            syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
-            view_name = '$expr'):
+                        output = '$output',
+                        syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
+                        view_name = '$expr'):
         if output_to == "panel":
             view = self._window.get_output_panel('clojure_output')
         elif output_to == "view":
@@ -251,6 +251,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 client.view.settings().set('scroll_past_end', True)
 
             view = client.view
+            bookmark_point = sublime.Region(view.size())
 
         if syntax_file:
             view.set_syntax_file(syntax_file)
@@ -265,7 +266,17 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                                      {"panel": "output.clojure_output"})
         else:
             view.sel().clear()
-            view.sel().add(sublime.Region(0))
+            if output_to == "view":
+                view.sel().add(sublime.Region(0))
+            else:
+                view.sel().add(bookmark_point)
+                bookmarks = view.get_regions('bookmarks')
+                bookmarks.append(bookmark_point)
+                view.add_regions('bookmarks',
+                                 bookmarks,
+                                 'bookmarks',
+                                 'bookmark',
+                                 sublime.HIDDEN | sublime.PERSISTENT)
 
             view_name = string.Template(view_name).safe_substitute(mapping)
             view.set_name(view_name)
@@ -279,7 +290,8 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 # different group
                 self._window.focus_view(active_view)
 
-            view.set_viewport_position(view.text_to_layout(0))
+            if output_to == "view":
+                view.set_viewport_position(view.text_to_layout(0))
 
 class ReplServerKiller(sublime_plugin.EventListener):
     def on_close(self, view):
