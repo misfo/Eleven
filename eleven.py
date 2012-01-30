@@ -250,7 +250,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 client.view = self._window.new_file()
                 client.view.set_scratch(True)
                 client.view.set_read_only(True)
-                client.view.settings().set('scroll_past_end', True)
+                client.view.settings().set('line_numbers', False)
 
             view = client.view
             bookmark_point = sublime.Region(view.size())
