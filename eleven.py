@@ -14,8 +14,10 @@ def symbol_char(char):
 def project_path(dir_name):
     if os.path.isfile(os.path.join(dir_name, 'project.clj')):
         return dir_name
+    elif dir_name == "/":
+        return None
     else:
-        return project_path(os.path.split(dir_name)[0])
+        return project_path(os.path.dirname(dir_name))
 
 def classpath_relative_path(file_name):
     (abs_path, ext) = os.path.splitext(file_name)
@@ -61,7 +63,7 @@ def start_repl_server(window_id, cwd):
 
 def on_repl_server_started(window_id, port):
     repl_servers = get_repl_servers()
-    repl_servers[window_id] = port
+    repl_servers[str(window_id)] = port
     set_repl_servers(repl_servers)
     sublime.status_message("Clojure REPL started on port " + str(port))
 
@@ -156,18 +158,21 @@ class ClojureStartRepl(sublime_plugin.WindowCommand):
                 set_repl_servers(repl_servers)
 
         sublime.status_message("Starting Clojure REPL")
-        #FIXME don't use active view
-        file_name = self.window.active_view().file_name()
-        cwd = None
-        if file_name:
-            dir_name = os.path.split(file_name)[0]
-            cwd = project_path(dir_name) or dir_name
-        else:
-            for folder in self.window.folders():
-                cwd = project_path(folder)
-                if cwd: break
 
-        thread.start_new_thread(start_repl_server, (str(wid), cwd))
+        thread.start_new_thread(start_repl_server, (wid, self._project_path()))
+
+    def _project_path(self):
+        folders = self.window.folders()
+        for folder in folders:
+            path = project_path(folder)
+            if path: return path
+
+        file_name = self.window.active_view().file_name()
+        if file_name:
+            dir_name = os.path.dirname(file_name)
+            return project_path(dir_name) or dir_name
+
+        return None
 
 class ClojureEvaluate(sublime_plugin.TextCommand):
     def run(self, edit, expr, input_panel = None, **kwargs):
