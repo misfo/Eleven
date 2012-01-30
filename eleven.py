@@ -1,12 +1,49 @@
 import re, os, socket, string, subprocess, thread, threading, time
 import sublime, sublime_plugin
 from functools import partial
+from string import Template
 
 max_cols = 60
 repls_file = ".eleven.json"
 
 def clean(str):
     return str.translate(None, '\r') if str else None
+
+def template_string_keys(template_str):
+    return [m[1] or m[2] for m
+            in Template.pattern.findall(template_str)
+            if m[1] or m[2]]
+
+
+def selection(view):
+    sel = view.sel()
+    if len(sel) == 1 and not sel[0].empty():
+        return view.substr(sel[0]).strip()
+    else:
+        raise UserWarning("There must be one selection to evaluate")
+
+def symbol_under_cursor(view):
+    begin = end = view.sel()[0].begin()
+    while symbol_char(view.substr(begin - 1)): begin -= 1
+    while symbol_char(view.substr(end)): end += 1
+    if begin == end:
+        raise UserWarning("No symbol found under cursor")
+    else:
+        return view.substr(sublime.Region(begin, end))
+
+def from_input_panel(window, options, on_done):
+    initial_text_chunks = options['initial_text']
+    initial_text = "".join(initial_text_chunks) if initial_text_chunks else ""
+    input_view = window.show_input_panel(options['prompt'],
+                                         initial_text,
+                                         on_done, None, None)
+
+    if initial_text_chunks and len(initial_text_chunks) > 1:
+        input_view.sel().clear()
+        offset = 0
+        for chunk in initial_text_chunks[0:-1]:
+            offset += len(chunk)
+            input_view.sel().add(sublime.Region(offset))
 
 def symbol_char(char):
     return re.match("[-\w*+!?/.<>]", char)
@@ -113,32 +150,6 @@ class ReplClient:
             elif output == "":
                 return (None, None)
 
-class LazyViewString:
-    def __init__(self, view):
-        self.view = view
-
-    def __str__(self):
-        if not hasattr(self, '_string_value'):
-            self._string_value = self.get_string()
-        return self._string_value
-
-class Selection(LazyViewString):
-    def get_string(self):
-        sel = self.view.sel()
-        if len(sel) == 1 and not sel[0].empty():
-            return self.view.substr(sel[0]).strip()
-        else:
-            raise UserWarning("There must be one selection to evaluate")
-
-class SymbolUnderCursor(LazyViewString):
-    def get_string(self):
-        begin = end = self.view.sel()[0].begin()
-        while symbol_char(self.view.substr(begin - 1)): begin -= 1
-        while symbol_char(self.view.substr(end)): end += 1
-        if begin == end:
-            raise UserWarning("No symbol found under cursor")
-        else:
-            return self.view.substr(sublime.Region(begin, end))
 
 
 class ClojureStartRepl(sublime_plugin.WindowCommand):
@@ -177,27 +188,32 @@ class ClojureStartRepl(sublime_plugin.WindowCommand):
 class ClojureEvaluate(sublime_plugin.TextCommand):
     def run(self, edit, expr, input_panel = None, **kwargs):
         self._window = self.view.window()
-        self._expr = expr
 
         self._window.run_command('clojure_start_repl')
 
-        if input_panel:
-            it = input_panel['initial_text']
-            on_done = partial(self._handle_input, **kwargs)
-            view = self._window.show_input_panel(input_panel['prompt'],
-                                                 "".join(it) if it else "",
-                                                 on_done, None, None)
+        input_keys = template_string_keys(expr)
+        input_mapping = {}
 
-            if it and len(it) > 1:
-                view.sel().clear()
-                offset = 0
-                for chunk in it[0:-1]:
-                    offset += len(chunk)
-                    view.sel().add(sublime.Region(offset))
+        try:
+            for key in ['selection', 'symbol_under_cursor']:
+                if key in input_keys:
+                    input_mapping[key] = globals()[key](self.view)
+        except UserWarning as warning:
+            sublime.status_message(str(warning))
+            return
+
+        on_done = partial(self._handle_input, expr=expr,
+                                              input_mapping=input_mapping,
+                                              **kwargs)
+        if 'from_input_panel' in input_keys:
+            from_input_panel(self._window, input_panel, on_done)
         else:
-            self._handle_input(None, **kwargs)
+            on_done(None)
 
-    def _handle_input(self, from_input_panel, output_to = "repl", **kwargs):
+    def _handle_input(self, from_input_panel, expr,
+                                              input_mapping,
+                                              output_to="repl",
+                                              **kwargs):
         wid = self._window.id()
         port = get_repl_servers().get(str(wid))
         if not port:
@@ -207,14 +223,8 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                                         **kwargs), 100)
             return
 
-        mapping = {"from_input_panel": from_input_panel,
-                   "selection": Selection(self.view),
-                   "symbol_under_cursor": SymbolUnderCursor(self.view)}
-        try:
-            expr = string.Template(self._expr).safe_substitute(mapping)
-        except UserWarning as warning:
-            sublime.status_message(str(warning))
-            return
+        expr = Template(expr).safe_substitute(input_mapping,
+                                              from_input_panel=from_input_panel)
 
         exprs = []
         file_name = self.view.file_name()
@@ -265,7 +275,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
 
         mapping = results[-1].copy()
         mapping.update(new_ns=client.ns)
-        output = string.Template(output).safe_substitute(mapping)
+        output = Template(output).safe_substitute(mapping)
         output_region = output_to_view(view, output)
 
         if output_to == "panel":
@@ -285,7 +295,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                                  'bookmark',
                                  sublime.HIDDEN | sublime.PERSISTENT)
 
-            view_name = string.Template(view_name).safe_substitute(mapping)
+            view_name = Template(view_name).safe_substitute(mapping)
             view.set_name(view_name)
 
             active_view = self._window.active_view()
