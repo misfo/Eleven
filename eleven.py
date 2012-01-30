@@ -230,20 +230,29 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                          + "(in-ns '" + file_ns + "))")
         exprs.append(expr)
 
-        if output_to == "repl":
-            client = clients.get(wid)
-            if not client or not is_open_in(client.view, self._window):
-                client = ReplClient(port)
-                clients[wid] = client
+        try:
+            if output_to == "repl":
+                client = clients.get(wid)
+                if not client or not is_open_in(client.view, self._window):
+                    client = ReplClient(port)
+                    clients[wid] = client
 
-        else:
-            client = ReplClient(port)
+            else:
+                client = ReplClient(port)
+        except socket.error as e:
+            if e.errno != 61:
+                raise e
+            client = None
 
         on_complete = partial(self._handle_results,
                               client = client,
                               output_to = output_to,
                               **kwargs)
-        thread.start_new_thread(client.evaluate, (exprs, on_complete))
+        if client:
+            thread.start_new_thread(client.evaluate, (exprs, on_complete))
+        else:
+            print "client socket failed to open"
+            on_complete(None)
 
     def _handle_results(self, results, client, output_to,
                         output = '$output',
