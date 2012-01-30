@@ -32,7 +32,7 @@
 				"initial_text": ["#\"", "\""]
 			},
 			"output_to": "view",
-			"syntax_file": "Packages/User/Clojure find-doc.tmLanguage"
+			"syntax_file": "Packages/Eleven/Clojure find-doc.tmLanguage"
 		}
 	},
 	{
