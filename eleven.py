@@ -128,7 +128,7 @@ class Selection(LazyViewString):
         if len(sel) == 1 and not sel[0].empty():
             return self.view.substr(sel[0]).strip()
         else:
-            raise UserWarning, "There must be one selection to evaluate"
+            raise UserWarning("There must be one selection to evaluate")
 
 class SymbolUnderCursor(LazyViewString):
     def get_string(self):
@@ -136,7 +136,7 @@ class SymbolUnderCursor(LazyViewString):
         while symbol_char(self.view.substr(begin - 1)): begin -= 1
         while symbol_char(self.view.substr(end)): end += 1
         if begin == end:
-            raise UserWarning, "No symbol found under cursor"
+            raise UserWarning("No symbol found under cursor")
         else:
             return self.view.substr(sublime.Region(begin, end))
 
@@ -213,7 +213,7 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
         try:
             expr = string.Template(self._expr).safe_substitute(mapping)
         except UserWarning as warning:
-            sublime.status_message(warning.message)
+            sublime.status_message(str(warning))
             return
 
         exprs = []
