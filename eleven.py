@@ -118,15 +118,20 @@ class ReplClient:
         self.sock.settimeout(10)
 
     def evaluate(self, exprs, on_complete=None):
-        if not self.ns:
-            _, self.ns = self._recv_until_prompted()
+        try:
+            if not self.ns:
+                _, self.ns = self._recv_until_prompted()
 
-        results = []
-        for expr in exprs:
-            self.sock.send(expr + "\n")
-            output, next_ns = self._recv_until_prompted()
-            results.append({'ns': self.ns, 'expr': expr, 'output': output})
-            self.ns = next_ns
+            results = []
+            for expr in exprs:
+                self.sock.send(expr + "\n")
+                output, next_ns = self._recv_until_prompted()
+                results.append({'ns': self.ns, 'expr': expr, 'output': output})
+                self.ns = next_ns
+        except (socket.error, EOFError) as e:
+            if type(e) != EOFError and e.errno != 54:
+                raise e
+            results = None
 
         if on_complete:
             sublime.set_timeout(partial(on_complete, results), 0)
@@ -148,7 +153,7 @@ class ReplClient:
             if match:
                 return (clean(match.group(1)), match.group(2))
             elif output == "":
-                return (None, None)
+                raise EOFError
 
 
 
@@ -236,25 +241,42 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                          + "(in-ns '" + file_ns + "))")
         exprs.append(expr)
 
-        if output_to == "repl":
-            client = clients.get(wid)
-            if not client or not is_open_in(client.view, self._window):
-                client = ReplClient(port)
-                clients[wid] = client
+        try:
+            if output_to == "repl":
+                client = clients.get(wid)
+                if not client or not is_open_in(client.view, self._window):
+                    client = ReplClient(port)
+                    clients[wid] = client
 
-        else:
-            client = ReplClient(port)
+            else:
+                client = ReplClient(port)
+        except socket.error as e:
+            if e.errno != 61:
+                raise e
+            client = None
 
         on_complete = partial(self._handle_results,
                               client = client,
                               output_to = output_to,
                               **kwargs)
-        thread.start_new_thread(client.evaluate, (exprs, on_complete))
+        if client:
+            thread.start_new_thread(client.evaluate, (exprs, on_complete))
+        else:
+            print "client socket failed to open"
+            on_complete(None)
 
     def _handle_results(self, results, client, output_to,
                         output = '$output',
                         syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
                         view_name = '$expr'):
+        if results == None:
+            sublime.error_message("The REPL server for this window died. "
+                                  + "Please try again.")
+            repl_servers = get_repl_servers()
+            del repl_servers[str(self._window.id())]
+            set_repl_servers(repl_servers)
+            return
+
         if output_to == "panel":
             view = self._window.get_output_panel('clojure_output')
         elif output_to == "view":
