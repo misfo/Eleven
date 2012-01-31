@@ -289,6 +289,8 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 client.view.set_scratch(True)
                 client.view.set_read_only(True)
                 client.view.settings().set('line_numbers', False)
+                syntax_file = 'Packages/Eleven/Clojure REPL.tmLanguage'
+                client.view.set_syntax_file(syntax_file)
 
             view = client.view
             bookmark_point = sublime.Region(view.size())
