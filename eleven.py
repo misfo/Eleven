@@ -202,22 +202,23 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
             sublime.status_message(str(warning))
             return
 
-        on_done = partial(self._handle_input, expr=expr,
-                                              input_mapping=input_mapping,
-                                              **kwargs)
+        on_done = partial(self._handle_input, expr, input_mapping, **kwargs)
         if 'from_input_panel' in input_keys:
             from_input_panel(self._window, input_panel, on_done)
         else:
             on_done(None)
 
-    def _handle_input(self, from_input_panel, expr,
-                                              input_mapping,
-                                              output_to="repl",
-                                              **kwargs):
+    def _handle_input(self, expr,
+                            input_mapping,
+                            from_input_panel,
+                            output_to="repl",
+                            **kwargs):
         wid = self._window.id()
         port = get_repl_servers().get(str(wid))
         if not port:
             sublime.set_timeout(partial(self._handle_input,
+                                        expr,
+                                        input_mapping,
                                         from_input_panel,
                                         output_to,
                                         **kwargs), 100)
