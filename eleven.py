@@ -14,6 +14,11 @@ def template_string_keys(template_str):
             in Template.pattern.findall(template_str)
             if m[1] or m[2]]
 
+def call_with_args_merged(func, args, more_args):
+    """Call func with more_args merged into args (useful w/ partial)"""
+    args = args.copy()
+    args.update(more_args)
+    return func(args)
 
 def selection(view):
     sel = view.sel()
@@ -73,9 +78,6 @@ def output_to_view(v, text):
     v.set_read_only(True)
     return sublime.Region(start, end)
 
-def is_open_in(view, window):
-    return view and window.get_view_index(view)[0] > -1
-
 
 def get_repl_servers():
     return sublime.load_settings(repls_file).get('repl_servers') or {}
@@ -104,6 +106,21 @@ def on_repl_server_started(window_id, port):
     set_repl_servers(repl_servers)
     sublime.status_message("Clojure REPL started on port " + str(port))
 
+def on_repl_died(window_id):
+    sublime.error_message("The REPL server for this window died. "
+                          + "Please try again.")
+    repl_servers = get_repl_servers()
+    del repl_servers[str(window_id)]
+    set_repl_servers(repl_servers)
+
+
+def get_repl_view(window):
+    try:
+        return (v for v
+                in window.views()
+                if v.settings().get('clojure_repl')).next()
+    except StopIteration:
+        return None
 
 # persistent REPL clients for each window that keep their dynamic vars
 clients = {}
@@ -111,7 +128,6 @@ clients = {}
 class ReplClient:
     def __init__(self, port):
         self.ns = None
-        self.view = None
 
         self.sock = socket.socket()
         self.sock.connect(('localhost', port))
@@ -133,10 +149,11 @@ class ReplClient:
                 raise e
             results = None
 
+        return_val = {'results': results, 'resulting_ns': self.ns}
         if on_complete:
-            sublime.set_timeout(partial(on_complete, results), 0)
+            sublime.set_timeout(partial(on_complete, return_val), 0)
         else:
-            return results
+            return return_val
 
     def kill(self):
         try:
@@ -154,7 +171,6 @@ class ReplClient:
                 return (clean(match.group(1)), match.group(2))
             elif output == "":
                 raise EOFError
-
 
 
 class ClojureStartRepl(sublime_plugin.WindowCommand):
@@ -190,61 +206,44 @@ class ClojureStartRepl(sublime_plugin.WindowCommand):
 
         return None
 
-class ClojureEvaluate(sublime_plugin.TextCommand):
-    def run(self, edit, expr, input_panel = None, **kwargs):
-        self._window = self.view.window()
 
-        self._window.run_command('clojure_start_repl')
+class ClojureEval(sublime_plugin.WindowCommand):
+    def run(self, exprs = None, input_panel = None, **kwargs):
+        self.window.run_command('clojure_start_repl')
 
-        input_keys = template_string_keys(expr)
-        input_mapping = {}
-
+        on_done = partial(self._handle_input, exprs, **kwargs)
+        need_input_panel = (expr for expr
+                            in exprs
+                            if 'from_input_panel' in template_string_keys(expr))
         try:
-            for key in ['selection', 'symbol_under_cursor']:
-                if key in input_keys:
-                    input_mapping[key] = globals()[key](self.view)
-        except UserWarning as warning:
-            sublime.status_message(str(warning))
-            return
-
-        on_done = partial(self._handle_input, expr, input_mapping, **kwargs)
-        if 'from_input_panel' in input_keys:
-            from_input_panel(self._window, input_panel, on_done)
-        else:
+            need_input_panel.next()
+            from_input_panel(self.window, input_panel, on_done)
+        except StopIteration:
             on_done(None)
 
-    def _handle_input(self, expr,
-                            input_mapping,
+    def _handle_input(self, exprs,
                             from_input_panel,
-                            output_to="repl",
+                            handler_command="clojure_output_to_repl",
+                            handler_args={},
                             **kwargs):
-        wid = self._window.id()
+        wid = self.window.id()
         port = get_repl_servers().get(str(wid))
         if not port:
             sublime.set_timeout(partial(self._handle_input,
-                                        expr,
-                                        input_mapping,
+                                        exprs,
                                         from_input_panel,
-                                        output_to,
+                                        handler_command,
+                                        handler_args
                                         **kwargs), 100)
             return
 
-        expr = Template(expr).safe_substitute(input_mapping,
-                                              from_input_panel=from_input_panel)
-
-        exprs = []
-        file_name = self.view.file_name()
-        if file_name:
-            path = classpath_relative_path(file_name)
-            file_ns = re.sub("/", ".", path)
-            exprs.append("(do (load \"/" + path + "\") "
-                         + "(in-ns '" + file_ns + "))")
-        exprs.append(expr)
+        exprs = (Template(expr).safe_substitute(from_input_panel=from_input_panel)
+                 for expr in exprs)
 
         try:
-            if output_to == "repl":
+            if handler_command == "clojure_output_to_repl":
                 client = clients.get(wid)
-                if not client or not is_open_in(client.view, self._window):
+                if not client or not get_repl_view(self.window):
                     client = ReplClient(port)
                     clients[wid] = client
 
@@ -255,88 +254,125 @@ class ClojureEvaluate(sublime_plugin.TextCommand):
                 raise e
             client = None
 
-        on_complete = partial(self._handle_results,
-                              client = client,
-                              output_to = output_to,
-                              **kwargs)
+        run_handler = partial(self.window.run_command, handler_command)
+        on_complete = partial(call_with_args_merged, run_handler, handler_args)
         if client:
             thread.start_new_thread(client.evaluate, (exprs, on_complete))
         else:
             print "client socket failed to open"
             on_complete(None)
 
-    def _handle_results(self, results, client, output_to,
-                        output = '$output',
-                        syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
-                        view_name = '$expr'):
-        if results == None:
-            sublime.error_message("The REPL server for this window died. "
-                                  + "Please try again.")
-            repl_servers = get_repl_servers()
-            del repl_servers[str(self._window.id())]
-            set_repl_servers(repl_servers)
+class ClojureEvalFromView(sublime_plugin.TextCommand):
+    def run_(self, args):
+        if 'event' in args:
+            del args['event']
+        return self.run(**args)
+
+    def run(self, exprs = None, **kwargs):
+        input_keys = [template_string_keys(expr) for expr in exprs]
+        input_keys = [item for sublist in input_keys for item in sublist]
+        input_mapping = {}
+
+        try:
+            for key in ['selection', 'symbol_under_cursor']:
+                if key in input_keys:
+                    input_mapping[key] = globals()[key](self.view)
+        except UserWarning as warning:
+            sublime.status_message(str(warning))
             return
 
-        if output_to == "panel":
-            view = self._window.get_output_panel('clojure_output')
-        elif output_to == "view":
-            view = self._window.new_file()
+        exprs = [Template(expr).safe_substitute(input_mapping) for expr in exprs]
+
+        file_name = self.view.file_name()
+        if file_name:
+            path = classpath_relative_path(file_name)
+            file_ns = re.sub("/", ".", path)
+            exprs.insert(0, "(do (load \"/" + path + "\") "
+                            + "(in-ns '" + file_ns + "))")
+
+        kwargs.update(exprs = exprs)
+        self.view.window().run_command('clojure_eval', kwargs)
+
+
+class ClojureOutputToRepl(sublime_plugin.WindowCommand):
+    def run(self, results = None, resulting_ns = None):
+        if results == None:
+            on_repl_died(self.window.id())
+            return
+
+        view = self._find_or_create_repl_view()
+        bookmark_point = sublime.Region(view.size())
+
+        output = Template("$ns=> $expr\n$output\n\n").safe_substitute(results[-1])
+        output_region = output_to_view(view, output)
+
+        view.sel().clear()
+        view.sel().add(bookmark_point)
+        bookmarks = view.get_regions('bookmarks')
+        bookmarks.append(bookmark_point)
+        view.add_regions('bookmarks', bookmarks, 'bookmarks', 'bookmark',
+                         sublime.HIDDEN | sublime.PERSISTENT)
+
+        view.set_name("(in-ns '" + resulting_ns + ")")
+
+        active_view = self.window.active_view()
+        active_group = self.window.active_group()
+        repl_view_group, _ = self.window.get_view_index(view)
+        self.window.focus_view(view)
+        if repl_view_group != active_group:
+            # give focus back to the originally active view if it's in a
+            # different group
+            self.window.focus_view(active_view)
+
+        # not sure why this has to be reversed
+        view.show(sublime.Region(output_region.b, output_region.a))
+
+    def _find_or_create_repl_view(self):
+        view = get_repl_view(self.window)
+
+        if not view:
+            view = self.window.new_file()
             view.set_scratch(True)
             view.set_read_only(True)
-        else:
-            if not client.view:
-                client.view = self._window.new_file()
-                client.view.set_scratch(True)
-                client.view.set_read_only(True)
-                client.view.settings().set('line_numbers', False)
-                syntax_file = 'Packages/Eleven/Clojure REPL.tmLanguage'
-                client.view.set_syntax_file(syntax_file)
+            view.settings().set('clojure_repl', True)
+            view.settings().set('line_numbers', False)
+            view.set_syntax_file('Packages/Eleven/Clojure REPL.tmLanguage')
 
-            view = client.view
-            bookmark_point = sublime.Region(view.size())
+        return view
 
+
+class ClojureOutputToPanel(sublime_plugin.WindowCommand):
+    def run(self, results = None, resulting_ns = None):
+        if results == None:
+            on_repl_died(self.window.id())
+            return
+
+        view = self.window.get_output_panel('clojure_output')
+        output_region = output_to_view(view, results[-1]['output'])
+        self.window.run_command("show_panel",
+                                {"panel": "output.clojure_output"})
+
+class ClojureOutputToView(sublime_plugin.WindowCommand):
+    def run(self, results = None,
+                  resulting_ns = None,
+                  syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
+                  view_name = '$expr'):
+        if results == None:
+            on_repl_died(self.window.id())
+            return
+
+        view = self.window.new_file()
+        view.set_scratch(True)
+        view.set_read_only(True)
         if syntax_file:
             view.set_syntax_file(syntax_file)
 
-        mapping = results[-1].copy()
-        mapping.update(new_ns=client.ns)
-        output = Template(output).safe_substitute(mapping)
-        output_region = output_to_view(view, output)
+        output_region = output_to_view(view, results[-1]['output'])
 
-        if output_to == "panel":
-            self._window.run_command("show_panel",
-                                     {"panel": "output.clojure_output"})
-        else:
-            view.sel().clear()
-            if output_to == "view":
-                view.sel().add(sublime.Region(0))
-            else:
-                view.sel().add(bookmark_point)
-                bookmarks = view.get_regions('bookmarks')
-                bookmarks.append(bookmark_point)
-                view.add_regions('bookmarks',
-                                 bookmarks,
-                                 'bookmarks',
-                                 'bookmark',
-                                 sublime.HIDDEN | sublime.PERSISTENT)
+        view.sel().clear()
+        view.sel().add(sublime.Region(0))
+        view.show(0)
 
-            view_name = Template(view_name).safe_substitute(mapping)
-            view.set_name(view_name)
-
-            active_view = self._window.active_view()
-            active_group = self._window.active_group()
-            repl_view_group, _ = self._window.get_view_index(view)
-            self._window.focus_view(view)
-            if repl_view_group != active_group:
-                # give focus back to the originally active view if it's in a
-                # different group
-                self._window.focus_view(active_view)
-
-            if output_to == "view":
-                view.show(0)
-            else:
-                # not sure why this has to be reversed
-                view.show(sublime.Region(output_region.b, output_region.a))
 
 class ReplServerKiller(sublime_plugin.EventListener):
     def on_close(self, view):
