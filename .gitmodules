@@ -1,0 +1,3 @@
+[submodule "nrepl/bencode"]
+	path = nrepl/bencode
+	url = http://github.com/bittorrent/bencode.git

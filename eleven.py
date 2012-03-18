@@ -1,24 +1,17 @@
-import re, os, socket, string, subprocess, thread, threading, time
-import sublime, sublime_plugin
+import re, os, socket, subprocess, thread
 from functools import partial
 from string import Template
+import sublime, sublime_plugin
+import nrepl
 
-max_cols = 60
-repls_file = ".eleven.json"
-
-def clean(str):
-    return str.translate(None, '\r') if str else None
+def resolve_attr(qualified_attr):
+    namespace, attr_name = re.match(r"(.+)\.([^.]+)", qualified_attr).groups()
+    return getattr(__import__(namespace), attr_name)
 
 def template_string_keys(template_str):
     return [m[1] or m[2] for m
             in Template.pattern.findall(template_str)
             if m[1] or m[2]]
-
-def call_with_args_merged(func, args, more_args):
-    """Call func with more_args merged into args (useful w/ partial)"""
-    args = args.copy()
-    args.update(more_args)
-    return func(args)
 
 def selection(view):
     sel = view.sel()
@@ -61,16 +54,7 @@ def project_path(dir_name):
     else:
         return project_path(os.path.dirname(dir_name))
 
-def classpath_relative_path(file_name):
-    (abs_path, ext) = os.path.splitext(file_name)
-    segments = []
-    while 1:
-        (abs_path, segment) = os.path.split(abs_path)
-        if segment == "src": return string.join(segments, "/")
-        segments.insert(0, segment)
-
-def output_to_view(v, text):
-    start = v.size()
+def insert_into_view(v, start, text):
     v.set_read_only(False)
     edit = v.begin_edit()
     end = start + v.insert(edit, start, text)
@@ -78,120 +62,45 @@ def output_to_view(v, text):
     v.set_read_only(True)
     return sublime.Region(start, end)
 
+def append_to_view(v, text):
+    return insert_into_view(v, v.size(), text)
 
-def get_repl_servers():
-    return sublime.load_settings(repls_file).get('repl_servers') or {}
-
-def set_repl_servers(repl_servers, save=True):
-    sublime.load_settings(repls_file).set('repl_servers', repl_servers)
-    if save:
-        sublime.save_settings(repls_file)
-
-
-def start_repl_server(window_id, cwd):
-    proc = subprocess.Popen(["lein", "repl"], stdout=subprocess.PIPE,
-                                              stderr=subprocess.PIPE,
-                                              cwd=cwd)
-    stdout, stderr = proc.communicate()
-    match = re.search(r"listening on localhost port (\d+)", stdout)
-    if match:
-        port = int(match.group(1))
-        sublime.set_timeout(partial(on_repl_server_started, window_id, port), 0)
-    else:
-        sublime.error_message("Unable to start a REPL with `lein repl`")
-
-def on_repl_server_started(window_id, port):
-    repl_servers = get_repl_servers()
-    repl_servers[str(window_id)] = port
-    set_repl_servers(repl_servers)
-    sublime.status_message("Clojure REPL started on port " + str(port))
-
-def on_repl_died(window_id):
-    sublime.error_message("The REPL server for this window died. "
-                          + "Please try again.")
-    repl_servers = get_repl_servers()
-    del repl_servers[str(window_id)]
-    set_repl_servers(repl_servers)
-
+def append_to_region(v, region_name, text):
+    regions = v.get_regions(region_name)
+    start = regions[-1].end()
+    region = insert_into_view(v, start, text)
+    regions.append(region)
+    v.add_regions(region_name, regions, '')
 
 def get_repl_view(window):
     try:
         return (v for v
                 in window.views()
-                if v.settings().get('clojure_repl')).next()
+                if v.settings().get('nrepl_port')).next()
     except StopIteration:
         return None
 
-# persistent REPL clients for each window that keep their dynamic vars
-clients = {}
-
-class ReplClient:
-    def __init__(self, port):
-        self.ns = None
-
-        self.sock = socket.socket()
-        self.sock.connect(('localhost', port))
-        self.sock.settimeout(10)
-
-    def evaluate(self, exprs, on_complete=None):
-        try:
-            if not self.ns:
-                _, self.ns = self._recv_until_prompted()
-
-            results = []
-            for expr in exprs:
-                self.sock.send(expr + "\n")
-                output, next_ns = self._recv_until_prompted()
-                results.append({'ns': self.ns, 'expr': expr, 'output': output})
-                self.ns = next_ns
-        except (socket.error, EOFError) as e:
-            if type(e) != EOFError and e.errno != 54:
-                raise e
-            results = None
-
-        return_val = {'results': results, 'resulting_ns': self.ns}
-        if on_complete:
-            sublime.set_timeout(partial(on_complete, return_val), 0)
-        else:
-            return return_val
-
-    def kill(self):
-        try:
-            self.evaluate(["(System/exit 0)"])
-        except socket.error:
-            # Probably already dead
-            pass
-
-    def _recv_until_prompted(self):
-        output = ""
-        while 1:
-            output += self.sock.recv(1024)
-            match = re.match(r"(.*\n)?(\S+)=> $", output, re.DOTALL)
-            if match:
-                return (clean(match.group(1)), match.group(2))
-            elif output == "":
-                raise EOFError
-
-
 class ClojureStartRepl(sublime_plugin.WindowCommand):
+    def is_enabled(self):
+        return not get_repl_view(self.window)
+
     def run(self):
-        wid = self.window.id()
-        repl_servers = get_repl_servers()
-        port = repl_servers.get(str(wid))
-        if port:
-            client = clients.get(wid)
-            if client:
-                return
-            try:
-                clients[wid] = ReplClient(port)
-                return
-            except socket.error:
-                del repl_servers[str(wid)]
-                set_repl_servers(repl_servers)
+        cwd = self._project_path()
 
-        sublime.status_message("Starting Clojure REPL")
+        repl_view = self.window.new_file()
 
-        thread.start_new_thread(start_repl_server, (wid, self._project_path()))
+        repl_view.set_name("nREPL launching...")
+        repl_view.set_scratch(True)
+        repl_view.set_read_only(True)
+        repl_view.settings().set('nrepl_port', None)
+        repl_view.settings().set('nrepl_cwd', cwd)
+        repl_view.settings().set('line_numbers', False)
+        repl_view.set_syntax_file('Packages/Clojure/Clojure.tmLanguage')
+
+        append_to_view(repl_view,
+                       ("; running `lein repl :headless`%s...\n"
+                        % ("in " + cwd if cwd else "")))
+        thread.start_new_thread(self._start_server, (repl_view, cwd))
 
     def _project_path(self):
         folders = self.window.folders()
@@ -199,78 +108,99 @@ class ClojureStartRepl(sublime_plugin.WindowCommand):
             path = project_path(folder)
             if path: return path
 
-        file_name = self.window.active_view().file_name()
-        if file_name:
-            dir_name = os.path.dirname(file_name)
-            return project_path(dir_name) or dir_name
+        active_view = self.window.active_view()
+        if active_view:
+            file_name = active_view.file_name()
+            if file_name:
+                dir_name = os.path.dirname(file_name)
+                return project_path(dir_name) or dir_name
 
         return None
 
+    def _start_server(self, repl_view, cwd):
+        ack_sock = socket.socket()
+        ack_sock.bind(('localhost', 0))
+        _, ack_port = ack_sock.getsockname()
+        env = os.environ.copy()
+        env.update(LEIN_REPL_ACK_PORT=str(ack_port))
+        proc = subprocess.Popen(["lein2", "repl", ":headless"],
+                                cwd=cwd, env=env)
+        ack = nrepl.wait_for_ack(ack_sock)
+        ack_sock.close()
+        port = ack['port']
+
+        sublime.set_timeout(partial(self._on_connected, repl_view, port), 0)
+
+    def _on_connected(self, repl_view, port):
+        repl_view.set_name("nREPL connected")
+        repl_view.settings().set('nrepl_port', port)
+        append_to_view(repl_view,
+            (("; nREPL server started on port %d\n" +
+              "; closing all REPL views using this port will kill the server\n")
+             % port))
+        repl_view.window().run_command('clojure_eval', {'expr': '(str "These ones go up to " (inc 10))'})
+
+class NreplManager(sublime_plugin.EventListener):
+    #TODO show nREPL status in status bar
+
+    def on_close(self, view):
+        port = view.settings().get('nrepl_port')
+        if port:
+            # If there are any other views using that server, don't kill it.
+            for w in sublime.windows():
+                for v in w.views():
+                    if v.settings().get('nrepl_port') == port and v.id() != view.id():
+                        return
+
+            client = nrepl.NreplClient('localhost', port)
+            thread.start_new_thread(client.kill_server, ())
+
+    def on_load(self, view):
+        port = view.settings().get('nrepl_port')
+        if port:
+            # We're loading a REPL window that existed from a hot exit.  Check
+            # if nREPL is still running on that port.
+            try:
+                nrepl.NreplClient('localhost', port)
+                print "nREPL on port %d is running" % port
+            except:
+                view.settings().set('nrepl_port', None)
+                append_to_view(view, ("\n\n" +
+                                      ";;;;;;;;;;;;;;;;\n" +
+                                      "; DISCONNECTED ;\n" +
+                                      ";;;;;;;;;;;;;;;;"))
 
 class ClojureEval(sublime_plugin.WindowCommand):
-    def run(self, exprs = None, input_panel = None, **kwargs):
-        self.window.run_command('clojure_start_repl')
+    def is_enabled(self):
+        return bool(get_repl_view(self.window))
 
-        on_done = partial(self._handle_input, exprs, **kwargs)
-        need_input_panel = (expr for expr
-                            in exprs
-                            if 'from_input_panel' in template_string_keys(expr))
-        try:
-            need_input_panel.next()
+    def run(self, expr = None, input_panel = None, **kwargs):
+        on_done = partial(self._handle_input, expr, **kwargs)
+        if 'from_input_panel' in template_string_keys(expr):
             from_input_panel(self.window, input_panel, on_done)
-        except StopIteration:
+        else:
             on_done(None)
 
-    def _handle_input(self, exprs,
-                            from_input_panel,
-                            handler_command="clojure_output_to_repl",
-                            handler_args={},
-                            **kwargs):
-        wid = self.window.id()
-        port = get_repl_servers().get(str(wid))
-        if not port:
-            sublime.set_timeout(partial(self._handle_input,
-                                        exprs,
-                                        from_input_panel,
-                                        handler_command,
-                                        handler_args
-                                        **kwargs), 100)
-            return
+    def _handle_input(self, expr, from_input_panel,
+                      handler="eleven_handlers.OutputToRepl", handler_args={}):
+        repl_view = get_repl_view(self.window)
+        expr = Template(expr).safe_substitute(from_input_panel=from_input_panel)
 
-        exprs = (Template(expr).safe_substitute(from_input_panel=from_input_panel)
-                 for expr in exprs)
+        port = int(repl_view.settings().get('nrepl_port'))
+        client = nrepl.NreplClient('localhost', port)
+        handler_class = resolve_attr(handler)
+        handler_obj = handler_class(args=handler_args,
+                                    window=self.window,
+                                    repl_view=repl_view)
+        thread.start_new_thread(client.eval, (expr, handler_obj))
 
-        try:
-            if handler_command == "clojure_output_to_repl":
-                client = clients.get(wid)
-                if not client or not get_repl_view(self.window):
-                    client = ReplClient(port)
-                    clients[wid] = client
-
-            else:
-                client = ReplClient(port)
-        except socket.error as e:
-            if e.errno != 61:
-                raise e
-            client = None
-
-        run_handler = partial(self.window.run_command, handler_command)
-        on_complete = partial(call_with_args_merged, run_handler, handler_args)
-        if client:
-            thread.start_new_thread(client.evaluate, (exprs, on_complete))
-        else:
-            print "client socket failed to open"
-            on_complete(None)
 
 class ClojureEvalFromView(sublime_plugin.TextCommand):
-    def run_(self, args):
-        if 'event' in args:
-            del args['event']
-        return self.run(**args)
+    def is_enabled(self):
+        return bool(get_repl_view(self.view.window()))
 
-    def run(self, exprs = None, **kwargs):
-        input_keys = [template_string_keys(expr) for expr in exprs]
-        input_keys = [item for sublist in input_keys for item in sublist]
+    def run(self, edit, expr, **kwargs):
+        input_keys = template_string_keys(expr)
         input_mapping = {}
 
         try:
@@ -281,110 +211,32 @@ class ClojureEvalFromView(sublime_plugin.TextCommand):
             sublime.status_message(str(warning))
             return
 
-        exprs = [Template(expr).safe_substitute(input_mapping) for expr in exprs]
+        expr = Template(expr).safe_substitute(input_mapping)
 
-        file_name = self.view.file_name()
-        if file_name:
-            path = classpath_relative_path(file_name)
-            file_ns = re.sub("/", ".", path)
-            exprs.insert(0, "(do (load \"/" + path + "\") "
-                            + "(in-ns '" + file_ns + "))")
+        # file_name = self.view.file_name()
+        # if file_name:
+        #     file_ns = re.sub("/", ".", path)
+        #     expr = ("(do (load-file \"%s\") (in-ns '%s) %s)"
+        #             % (file_name, file_ns, expr))
 
-        kwargs.update(exprs = exprs)
+        kwargs.update(expr = expr)
         self.view.window().run_command('clojure_eval', kwargs)
 
 
-class ClojureOutputToRepl(sublime_plugin.WindowCommand):
-    def run(self, results = None, resulting_ns = None):
-        if results == None:
-            on_repl_died(self.window.id())
-            return
+class nrepl_handler(object):
+    def __init__(self, args, window, repl_view):
+        self.args = args
+        self.window = window
+        self.repl_view = repl_view
+        for callback in ('on_sent', 'on_out', 'on_err', 'on_value',
+                         'on_status', 'on_done'):
+            unwrapped = "_%s" % callback
+            if hasattr(self, unwrapped):
+                setattr(self, callback, self._wrapped_callback(unwrapped))
 
-        view = self._find_or_create_repl_view()
-        bookmark_point = sublime.Region(view.size())
+    def on_sent(self, req):
+        self.req = req
 
-        output = Template("$ns=> $expr\n$output\n\n").safe_substitute(results[-1])
-        output_region = output_to_view(view, output)
-
-        view.sel().clear()
-        view.sel().add(bookmark_point)
-        bookmarks = view.get_regions('bookmarks')
-        bookmarks.append(bookmark_point)
-        view.add_regions('bookmarks', bookmarks, 'bookmarks', 'bookmark',
-                         sublime.HIDDEN | sublime.PERSISTENT)
-
-        view.set_name("(in-ns '" + resulting_ns + ")")
-
-        active_view = self.window.active_view()
-        active_group = self.window.active_group()
-        repl_view_group, _ = self.window.get_view_index(view)
-        self.window.focus_view(view)
-        if repl_view_group != active_group:
-            # give focus back to the originally active view if it's in a
-            # different group
-            self.window.focus_view(active_view)
-
-        # not sure why this has to be reversed
-        view.show(sublime.Region(output_region.b, output_region.a))
-
-    def _find_or_create_repl_view(self):
-        view = get_repl_view(self.window)
-
-        if not view:
-            view = self.window.new_file()
-            view.set_scratch(True)
-            view.set_read_only(True)
-            view.settings().set('clojure_repl', True)
-            view.settings().set('line_numbers', False)
-            view.set_syntax_file('Packages/Eleven/Clojure REPL.tmLanguage')
-
-        return view
-
-
-class ClojureOutputToPanel(sublime_plugin.WindowCommand):
-    def run(self, results = None, resulting_ns = None):
-        if results == None:
-            on_repl_died(self.window.id())
-            return
-
-        view = self.window.get_output_panel('clojure_output')
-        output_region = output_to_view(view, results[-1]['output'])
-        self.window.run_command("show_panel",
-                                {"panel": "output.clojure_output"})
-
-class ClojureOutputToView(sublime_plugin.WindowCommand):
-    def run(self, results = None,
-                  resulting_ns = None,
-                  syntax_file = 'Packages/Clojure/Clojure.tmLanguage',
-                  view_name = '$expr'):
-        if results == None:
-            on_repl_died(self.window.id())
-            return
-
-        view = self.window.new_file()
-        view.set_scratch(True)
-        view.set_read_only(True)
-        if syntax_file:
-            view.set_syntax_file(syntax_file)
-
-        output_region = output_to_view(view, results[-1]['output'])
-
-        view.sel().clear()
-        view.sel().add(sublime.Region(0))
-        view.show(0)
-
-
-class ReplServerKiller(sublime_plugin.EventListener):
-    def on_close(self, view):
-        wids = [str(w.id()) for w in sublime.windows()]
-        servers = get_repl_servers()
-        active_servers = dict((w, servers[w]) for w in wids if w in servers)
-        kill_ports = set(servers.values()) - set(active_servers.values())
-
-        # Bring out yer dead!
-        for port in kill_ports:
-            repl = ReplClient(port)
-            thread.start_new_thread(repl.kill, ())
-
-        if servers != active_servers:
-            set_repl_servers(active_servers)
+    def _wrapped_callback(self, method_name):
+        method = getattr(self, method_name)
+        return lambda m: sublime.set_timeout(partial(method, m), 0)

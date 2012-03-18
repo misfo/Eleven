@@ -4,50 +4,18 @@
 		"command": "clojure_start_repl"
 	},
 	{
-		"caption": "Clojure: Evaluate Selection",
-		"command": "clojure_eval_from_view",
-		"args": {
-			"exprs": ["${selection}"],
-			"handler_command": "clojure_output_to_repl"
-		}
-	},
-	{
-		"caption": "Clojure: Expand Macro",
-		"command": "clojure_eval_from_view",
-		"args": {
-			"exprs": ["(macroexpand '${selection})"],
-			"handler_command": "clojure_output_to_repl"
-		}
-	},
-	{
 		"caption": "Clojure: Find Documentation",
 		"command": "clojure_eval",
 		"args": {
-			"exprs": ["(clojure.repl/find-doc ${from_input_panel})"],
+			"expr": "(clojure.repl/find-doc ${from_input_panel})",
 			"input_panel": {
 				"prompt": "(clojure.repl/find-doc _)",
 				"initial_text": ["#\"", "\""]
 			},
-			"handler_command": "clojure_output_to_view",
+			"handler": "eleven_handlers.OutputToView",
 			"handler_args": {
 				"syntax_file": "Packages/Eleven/Clojure find-doc.tmLanguage"
 			}
-		}
-	},
-	{
-		"caption": "Clojure: Symbol Documentation",
-		"command": "clojure_eval_from_view",
-		"args": {
-			"exprs": ["(clojure.repl/doc ${symbol_under_cursor})"],
-			"handler_command": "clojure_output_to_panel"
-		}
-	},
-	{
-		"caption": "Clojure: Symbol Source",
-		"command": "clojure_eval_from_view",
-		"args": {
-			"exprs": ["(clojure.repl/source ${symbol_under_cursor})"],
-			"handler_command": "clojure_output_to_view"
 		}
 	}
 ]

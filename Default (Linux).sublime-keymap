@@ -1,0 +1,7 @@
+[
+
+	{"keys": ["ctrl+shift+x"], "command": "clojure_eval_from_view", "args": {"expr": "${selection}"}},
+	{"keys": ["ctrl+alt+m"], "command": "clojure_macroexpand"},
+	{"keys": ["ctrl+alt+d"], "command": "clojure_view_doc"},
+	{"keys": ["ctrl+alt+s"], "command": "clojure_view_source"}
+]
