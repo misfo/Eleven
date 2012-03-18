@@ -199,7 +199,7 @@ class ClojureEvalFromView(sublime_plugin.TextCommand):
     def is_enabled(self):
         return bool(get_repl_view(self.view.window()))
 
-    def run(self, edit, expr, **kwargs):
+    def run(self, edit, expr, in_ns=True, **kwargs):
         input_keys = template_string_keys(expr)
         input_mapping = {}
 
@@ -213,11 +213,14 @@ class ClojureEvalFromView(sublime_plugin.TextCommand):
 
         expr = Template(expr).safe_substitute(input_mapping)
 
-        # file_name = self.view.file_name()
-        # if file_name:
-        #     file_ns = re.sub("/", ".", path)
-        #     expr = ("(do (load-file \"%s\") (in-ns '%s) %s)"
-        #             % (file_name, file_ns, expr))
+        file_name = self.view.file_name()
+        if in_ns and file_name:
+            #TODO use ns form in file
+            _, after_src = file_name.rsplit("/src/", 1)
+            file_ns = re.sub(r"\.clj$", "", re.sub("/", ".", after_src))
+            #TODO prompt to save the file first
+            expr = ("(do (load-file \"%s\") (in-ns '%s) %s)"
+                    % (file_name, file_ns, expr))
 
         kwargs.update(expr = expr)
         self.view.window().run_command('clojure_eval', kwargs)
